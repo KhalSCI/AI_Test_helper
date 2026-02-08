@@ -34,9 +34,10 @@ SYSTEM_PROMPT = (
     "   - Przepisz macierz element po elemencie.\n"
     "3. Rozwiąż zadanie samodzielnie krok po kroku, NIE patrząc jeszcze na odpowiedzi do wyboru. "
     "Jeśli tworzysz ranking — warianty o identycznych wartościach zajmują tę samą pozycję.\n"
-    "4. Dopiero teraz porównaj swój wynik z podanymi odpowiedziami (A/B/C/D) i wybierz tę, która pasuje.\n"
-    "5. Podaj literę odpowiedzi i krótkie uzasadnienie (1-2 zdania).\n"
-    "Jeśli to nie jest pytanie wielokrotnego wyboru — odpowiedz bezpośrednio i zwięźle.\n"
+    "4. Dopiero teraz porównaj swój wynik z podanymi odpowiedziami i wybierz tę, która pasuje.\n"
+    "5. Na samym końcu odpowiedzi napisz linię: ODPOWIEDŹ: X (gdzie X to litera A/B/C/D/E/F/G/H).\n"
+    "Jeśli to nie jest pytanie wielokrotnego wyboru — odpowiedz bezpośrednio i zwięźle, "
+    "a na końcu napisz: ODPOWIEDŹ: [twoja krótka odpowiedź].\n"
     "Zawsze odpowiadaj po polsku."
 )
 
@@ -110,7 +111,34 @@ def call_llm(image_b64: str, ocr_text: str = "") -> dict:
     provider = os.getenv("LLM_PROVIDER", "anthropic").lower()
     if provider == "openai":
         return _call_openai(image_b64, ocr_text)
-    return _call_anthropic(image_b64, ocr_text)
+    text = _call_anthropic(image_b64, ocr_text)
+    return _parse_response(text)
+
+
+def _parse_response(text: str) -> dict:
+    """Parse response with ODPOWIEDŹ: tag at the end."""
+    import re
+    letter = ""
+    answer = ""
+    reasoning = text.strip()
+
+    # Look for ODPOWIEDŹ: X line
+    m = re.search(r'ODPOWIED[ŹZ]:\s*(.+)', text, re.IGNORECASE)
+    if m:
+        answer_raw = m.group(1).strip()
+        # Check if it's just a letter
+        if len(answer_raw) == 1 and answer_raw in "ABCDEFGH":
+            letter = answer_raw
+            answer = answer_raw
+        elif answer_raw and answer_raw[0] in "ABCDEFGH" and (len(answer_raw) < 2 or answer_raw[1] in " .):–-—"):
+            letter = answer_raw[0]
+            answer = answer_raw
+        else:
+            answer = answer_raw
+        # Everything before the tag is reasoning
+        reasoning = text[:m.start()].strip()
+
+    return {"letter": letter, "answer": answer, "reasoning": reasoning}
 
 
 def _build_user_text(ocr_text: str) -> str:
@@ -159,15 +187,8 @@ def _call_openai(image_b64: str, ocr_text: str = "") -> dict:
 
 # ─── Anthropic ────────────────────────────────────────────────────────────────
 
-def _call_anthropic(image_b64: str, ocr_text: str = "") -> dict:
+def _call_anthropic(image_b64: str, ocr_text: str = "") -> str:
     api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    user_text = _build_user_text(ocr_text) + (
-        "\n\nNajpierw rozwiąż zadanie krok po kroku, potem podaj odpowiedź."
-        "\nOdpowiedz WYŁĄCZNIE obiektem JSON w tym formacie, bez żadnego innego tekstu:\n"
-        '{"reasoning": "pełna analiza krok po kroku", '
-        '"letter": "A/B/C/D lub pusty string jeśli nie dotyczy", '
-        '"answer": "krótka odpowiedź z uzasadnieniem"}'
-    )
     resp = requests.post(
         "https://api.anthropic.com/v1/messages",
         headers={
@@ -177,7 +198,7 @@ def _call_anthropic(image_b64: str, ocr_text: str = "") -> dict:
         },
         json={
             "model": "claude-opus-4-6",
-            "max_tokens": 2048,
+            "max_tokens": 4096,
             "system": SYSTEM_PROMPT,
             "messages": [
                 {
@@ -191,19 +212,16 @@ def _call_anthropic(image_b64: str, ocr_text: str = "") -> dict:
                                 "data": image_b64,
                             },
                         },
-                        {"type": "text", "text": user_text},
+                        {"type": "text", "text": _build_user_text(ocr_text)},
                     ],
                 }
             ],
         },
-        timeout=60,
+        timeout=90,
     )
     if not resp.ok:
         raise RuntimeError(f"Anthropic {resp.status_code}: {resp.text[:300]}")
-    raw = resp.json()["content"][0]["text"].strip()
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-    return json.loads(raw)
+    return resp.json()["content"][0]["text"]
 
 
 # ─── Screenshot ───────────────────────────────────────────────────────────────
@@ -258,6 +276,7 @@ class OverlayWindow(Gtk.Window):
         # Auto-close timer
         self._close_timer = None
         self._minimized = False
+        self._full_answer = ""
 
         # Fade-in
         self.set_opacity(0)
