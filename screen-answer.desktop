@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Screen Answer
+Comment=LLM-powered screen answer overlay (Ctrl+Shift+A)
+Exec=/home/khal/Desktop/WD_APP/.venv/bin/python3 /home/khal/Desktop/WD_APP/screen_answer.py
+Icon=dialog-question
+Terminal=false
+Categories=Utility;
+StartupNotify=false
+X-GNOME-Autostart-enabled=true
