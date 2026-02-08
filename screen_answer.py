@@ -2,7 +2,6 @@
 """Screen Answer Overlay — LLM-powered screenshot analyzer."""
 
 import base64
-import json
 import os
 import subprocess
 import threading
@@ -77,41 +76,14 @@ CSS = """
 
 # ─── LLM Client ──────────────────────────────────────────────────────────────
 
-# OpenAI structured output schema (used for openai provider)
-OPENAI_RESPONSE_SCHEMA = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "answer_response",
-        "strict": True,
-        "schema": {
-            "type": "object",
-            "properties": {
-                "reasoning": {
-                    "type": "string",
-                    "description": "Full step-by-step analysis.",
-                },
-                "letter": {
-                    "type": "string",
-                    "description": "Answer letter: A, B, C or D. Empty if not applicable.",
-                },
-                "answer": {
-                    "type": "string",
-                    "description": "Short answer (1-2 sentences) with justification.",
-                },
-            },
-            "required": ["reasoning", "letter", "answer"],
-            "additionalProperties": False,
-        },
-    },
-}
-
 
 def call_llm(image_b64: str, ocr_text: str = "") -> dict:
     """Returns dict with keys: letter, answer, reasoning."""
     provider = os.getenv("LLM_PROVIDER", "anthropic").lower()
     if provider == "openai":
-        return _call_openai(image_b64, ocr_text)
-    text = _call_anthropic(image_b64, ocr_text)
+        text = _call_openai(image_b64, ocr_text)
+    else:
+        text = _call_anthropic(image_b64, ocr_text)
     return _parse_response(text)
 
 
@@ -151,15 +123,14 @@ def _build_user_text(ocr_text: str) -> str:
 
 # ─── OpenAI ───────────────────────────────────────────────────────────────────
 
-def _call_openai(image_b64: str, ocr_text: str = "") -> dict:
+def _call_openai(image_b64: str, ocr_text: str = "") -> str:
     api_key = os.getenv("OPENAI_API_KEY", "")
     resp = requests.post(
         "https://api.openai.com/v1/chat/completions",
         headers={"Authorization": f"Bearer {api_key}"},
         json={
             "model": "gpt-5.2",
-            "max_completion_tokens": 2000,
-            "response_format": OPENAI_RESPONSE_SCHEMA,
+            "max_completion_tokens": 4096,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {
@@ -177,12 +148,11 @@ def _call_openai(image_b64: str, ocr_text: str = "") -> dict:
                 },
             ],
         },
-        timeout=30,
+        timeout=90,
     )
     if not resp.ok:
         raise RuntimeError(f"OpenAI {resp.status_code}: {resp.text[:300]}")
-    content = resp.json()["choices"][0]["message"]["content"]
-    return json.loads(content)
+    return resp.json()["choices"][0]["message"]["content"]
 
 
 # ─── Anthropic ────────────────────────────────────────────────────────────────
