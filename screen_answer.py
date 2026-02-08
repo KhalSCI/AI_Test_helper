@@ -21,14 +21,23 @@ load_dotenv()
 SCREENSHOT_PATH = "/tmp/screen_answer.png"
 OVERLAY_WIDTH = 420
 OVERLAY_HEIGHT = 220
-AUTO_CLOSE_SEC = 30
+AUTO_CLOSE_SEC = 180
 
 SYSTEM_PROMPT = (
-    "You are analyzing a screenshot. "
-    "Read ALL text on the screen carefully and precisely — every word, number, and symbol matters. "
-    "If it's a multiple choice question: identify the correct answer letter (A/B/C/D) with a short justification (1-2 sentences). "
-    "If it's another type of question or task: answer it directly and concisely. "
-    "Always respond in the same language as the question on the screenshot."
+    "Analizujesz zrzut ekranu z pytaniem lub zadaniem.\n"
+    "Postępuj dokładnie według tych kroków:\n"
+    "1. Przeczytaj CAŁY tekst na ekranie uważnie i precyzyjnie.\n"
+    "2. Jeśli na obrazie jest macierz lub tabela:\n"
+    "   - Policz DOKŁADNIE liczbę wierszy i kolumn. Nie zgaduj — licz linie i separatory.\n"
+    "   - Odczytaj każdą wartość osobno, zwracając szczególną uwagę na ułamki (np. 1/2, 3/4, -1/3). "
+    "Nie myl ułamków z całymi liczbami ani nie łącz sąsiednich komórek.\n"
+    "   - Przepisz macierz element po elemencie.\n"
+    "3. Rozwiąż zadanie samodzielnie krok po kroku, NIE patrząc jeszcze na odpowiedzi do wyboru. "
+    "Jeśli tworzysz ranking — warianty o identycznych wartościach zajmują tę samą pozycję.\n"
+    "4. Dopiero teraz porównaj swój wynik z podanymi odpowiedziami (A/B/C/D) i wybierz tę, która pasuje.\n"
+    "5. Podaj literę odpowiedzi i krótkie uzasadnienie (1-2 zdania).\n"
+    "Jeśli to nie jest pytanie wielokrotnego wyboru — odpowiedz bezpośrednio i zwięźle.\n"
+    "Zawsze odpowiadaj po polsku."
 )
 
 CSS = """
@@ -51,7 +60,7 @@ CSS = """
     font-size: 13px;
     font-style: italic;
 }
-#btn-copy, #btn-close {
+#btn-copy, #btn-close, #btn-minimize {
     background: rgba(255,255,255,0.10);
     border: none;
     border-radius: 8px;
@@ -59,7 +68,7 @@ CSS = """
     padding: 4px 14px;
     min-height: 28px;
 }
-#btn-copy:hover, #btn-close:hover {
+#btn-copy:hover, #btn-close:hover, #btn-minimize:hover {
     background: rgba(255,255,255,0.20);
 }
 """
@@ -96,15 +105,13 @@ OPENAI_RESPONSE_SCHEMA = {
 }
 
 
-def call_llm(image_b64: str) -> dict:
+def call_llm(image_b64: str, ocr_text: str = "") -> dict:
     """Returns dict with keys: letter, answer."""
-    provider = os.getenv("LLM_PROVIDER", "gemini").lower()
+    provider = os.getenv("LLM_PROVIDER", "anthropic").lower()
     if provider == "openai":
-        return _call_openai(image_b64)
-    if provider == "anthropic":
-        text = _call_anthropic(image_b64)
-        return _parse_text_response(text)
-    return _call_gemini(image_b64)
+        return _call_openai(image_b64, ocr_text)
+    text = _call_anthropic(image_b64, ocr_text)
+    return _parse_text_response(text)
 
 
 def _parse_text_response(text: str) -> dict:
@@ -118,63 +125,17 @@ def _parse_text_response(text: str) -> dict:
     return {"letter": "", "answer": stripped}
 
 
-# ─── Gemini ───────────────────────────────────────────────────────────────────
-
-def _call_gemini(image_b64: str) -> dict:
-    api_key = os.getenv("GEMINI_API_KEY", "")
-    model = os.getenv("GEMINI_MODEL", "gemini-3-pro-preview")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-
-    resp = requests.post(
-        url,
-        headers={
-            "x-goog-api-key": api_key,
-            "Content-Type": "application/json",
-        },
-        json={
-            "systemInstruction": {
-                "parts": [{"text": SYSTEM_PROMPT}],
-            },
-            "contents": [
-                {
-                    "parts": [
-                        {
-                            "inline_data": {
-                                "mime_type": "image/png",
-                                "data": image_b64,
-                            },
-                        },
-                        {"text": "Analyze the question/task visible on this screenshot and provide the answer."},
-                    ],
-                }
-            ],
-            "generationConfig": {
-                "thinkingConfig": {
-                    "thinkingLevel": "high",
-                    "includeThoughts": False,
-                },
-                "maxOutputTokens": 1000,
-            },
-        },
-        timeout=60,
-    )
-    if not resp.ok:
-        raise RuntimeError(f"Gemini {resp.status_code}: {resp.text[:300]}")
-
-    data = resp.json()
-    # Extract text from response parts (skip thought parts)
-    parts = data["candidates"][0]["content"]["parts"]
-    text = ""
-    for part in parts:
-        if "text" in part and not part.get("thought"):
-            text += part["text"]
-
-    return _parse_text_response(text)
+def _build_user_text(ocr_text: str) -> str:
+    """Build user message text, including OCR extract if available."""
+    base = "Przeanalizuj pytanie/zadanie widoczne na tym zrzucie ekranu i podaj odpowiedź."
+    if ocr_text.strip():
+        return f"OCR text extracted from the screenshot:\n{ocr_text}\n\n{base}"
+    return base
 
 
 # ─── OpenAI ───────────────────────────────────────────────────────────────────
 
-def _call_openai(image_b64: str) -> dict:
+def _call_openai(image_b64: str, ocr_text: str = "") -> dict:
     api_key = os.getenv("OPENAI_API_KEY", "")
     resp = requests.post(
         "https://api.openai.com/v1/chat/completions",
@@ -195,7 +156,7 @@ def _call_openai(image_b64: str) -> dict:
                                 "detail": "high",
                             },
                         },
-                        {"type": "text", "text": "Analyze the question/task visible on this screenshot and provide the answer."},
+                        {"type": "text", "text": _build_user_text(ocr_text)},
                     ],
                 },
             ],
@@ -210,7 +171,7 @@ def _call_openai(image_b64: str) -> dict:
 
 # ─── Anthropic ────────────────────────────────────────────────────────────────
 
-def _call_anthropic(image_b64: str) -> str:
+def _call_anthropic(image_b64: str, ocr_text: str = "") -> str:
     api_key = os.getenv("ANTHROPIC_API_KEY", "")
     resp = requests.post(
         "https://api.anthropic.com/v1/messages",
@@ -220,8 +181,8 @@ def _call_anthropic(image_b64: str) -> str:
             "content-type": "application/json",
         },
         json={
-            "model": "claude-sonnet-4-5-20250929",
-            "max_tokens": 1000,
+            "model": "claude-opus-4-6",
+            "max_tokens": 4096,
             "system": SYSTEM_PROMPT,
             "messages": [
                 {
@@ -235,12 +196,12 @@ def _call_anthropic(image_b64: str) -> str:
                                 "data": image_b64,
                             },
                         },
-                        {"type": "text", "text": "Analyze the question/task visible on this screenshot and provide the answer."},
+                        {"type": "text", "text": _build_user_text(ocr_text)},
                     ],
                 }
             ],
         },
-        timeout=30,
+        timeout=90,
     )
     if not resp.ok:
         raise RuntimeError(f"Anthropic {resp.status_code}: {resp.text[:300]}")
@@ -249,9 +210,10 @@ def _call_anthropic(image_b64: str) -> str:
 
 # ─── Screenshot ───────────────────────────────────────────────────────────────
 
-def take_screenshot() -> str:
+def take_screenshot(select_region: bool = False) -> str:
     """Capture screen via maim, return base64-encoded PNG."""
-    subprocess.run(["maim", SCREENSHOT_PATH], check=True)
+    cmd = ["maim", "-s", SCREENSHOT_PATH] if select_region else ["maim", SCREENSHOT_PATH]
+    subprocess.run(cmd, check=True)
     with open(SCREENSHOT_PATH, "rb") as f:
         return base64.b64encode(f.read()).decode()
 
@@ -297,6 +259,7 @@ class OverlayWindow(Gtk.Window):
 
         # Auto-close timer
         self._close_timer = None
+        self._minimized = False
 
         # Fade-in
         self.set_opacity(0)
@@ -318,13 +281,22 @@ class OverlayWindow(Gtk.Window):
         btn_close.set_name("btn-close")
         btn_close.connect("clicked", lambda _: self.destroy())
         top.pack_end(btn_close, False, False, 0)
+
+        btn_min = Gtk.Button(label="—")
+        btn_min.set_name("btn-minimize")
+        btn_min.connect("clicked", self._on_minimize)
+        top.pack_end(btn_min, False, False, 4)
+
         frame.pack_start(top, False, False, 0)
+
+        # Content area (hideable for minimize)
+        self._content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
 
         # Answer letter
         self._letter = Gtk.Label()
         self._letter.set_name("answer-letter")
         self._letter.set_halign(Gtk.Align.START)
-        frame.pack_start(self._letter, False, False, 0)
+        self._content.pack_start(self._letter, False, False, 0)
 
         # Answer body (scrollable)
         scroll = Gtk.ScrolledWindow()
@@ -339,14 +311,16 @@ class OverlayWindow(Gtk.Window):
         self._body.set_max_width_chars(50)
         self._body.set_selectable(True)
         scroll.add(self._body)
-        frame.pack_start(scroll, True, True, 0)
+        self._content.pack_start(scroll, True, True, 0)
 
         # Copy button
         btn_copy = Gtk.Button(label="Kopiuj")
         btn_copy.set_name("btn-copy")
         btn_copy.set_halign(Gtk.Align.START)
         btn_copy.connect("clicked", self._on_copy)
-        frame.pack_start(btn_copy, False, False, 0)
+        self._content.pack_start(btn_copy, False, False, 0)
+
+        frame.pack_start(self._content, True, True, 0)
 
         self.add(frame)
 
@@ -356,6 +330,20 @@ class OverlayWindow(Gtk.Window):
             return
         self.set_opacity(alpha)
         GLib.timeout_add(30, self._fade_in_step, alpha + 0.08)
+
+    def _on_minimize(self, _btn):
+        if self._minimized:
+            self._content.show_all()
+            self._status.show()
+            self.set_opacity(0.92)
+            self.resize(OVERLAY_WIDTH, OVERLAY_HEIGHT)
+            self._minimized = False
+        else:
+            self._content.hide()
+            self._status.hide()
+            self.set_opacity(0.01)
+            self.resize(1, 1)
+            self._minimized = True
 
     def _on_key(self, _widget, event):
         if event.keyval == Gdk.KEY_Escape:
@@ -398,11 +386,15 @@ class App:
     def __init__(self):
         self._overlay = None
 
-    def trigger(self):
-        """Called from hotkey thread — schedule work on GTK main thread."""
-        GLib.idle_add(self._run)
+    def trigger_region(self):
+        """Ctrl+Shift+Q — select region."""
+        GLib.idle_add(self._run, True)
 
-    def _run(self):
+    def trigger_full(self):
+        """Ctrl+Shift+W — full screen."""
+        GLib.idle_add(self._run, False)
+
+    def _run(self, select_region: bool):
         # Close previous overlay if open
         if self._overlay:
             try:
@@ -410,18 +402,21 @@ class App:
             except Exception:
                 pass
 
-        self._overlay = OverlayWindow()
+        # Take screenshot before showing overlay (region select needs clean screen)
+        threading.Thread(target=self._process, args=(select_region,), daemon=True).start()
 
-        # Run LLM call in background thread
-        threading.Thread(target=self._process, daemon=True).start()
-
-    def _process(self):
+    def _process(self, select_region: bool):
         try:
-            img_b64 = take_screenshot()
+            img_b64 = take_screenshot(select_region)
+            GLib.idle_add(self._show_overlay)
             answer = call_llm(img_b64)
             GLib.idle_add(self._overlay.show_answer, answer)
         except Exception as e:
+            GLib.idle_add(self._show_overlay)
             GLib.idle_add(self._overlay.show_error, f"Błąd: {e}")
+
+    def _show_overlay(self):
+        self._overlay = OverlayWindow()
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
@@ -430,12 +425,18 @@ def main():
     app = App()
 
     # Global hotkey listener (runs in its own thread)
-    hotkeys = keyboard.GlobalHotKeys({"<ctrl>+<shift>+a": app.trigger})
+    hotkeys = keyboard.GlobalHotKeys({
+        "<ctrl>+<shift>+q": app.trigger_region,
+        "<ctrl>+<shift>+w": app.trigger_full,
+    })
     hotkeys.daemon = True
     hotkeys.start()
 
-    provider = os.getenv("LLM_PROVIDER", "gemini").lower()
-    print(f"Screen Answer [{provider}] — nasłuchiwanie Ctrl+Shift+A  (Ctrl+C aby zakończyć)")
+    provider = os.getenv("LLM_PROVIDER", "anthropic").lower()
+    print(f"Screen Answer [{provider}]")
+    print("  Ctrl+Shift+Q — zaznacz region")
+    print("  Ctrl+Shift+W — cały ekran")
+    print("  Ctrl+C aby zakończyć")
 
     try:
         Gtk.main()
