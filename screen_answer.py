@@ -106,23 +106,11 @@ OPENAI_RESPONSE_SCHEMA = {
 
 
 def call_llm(image_b64: str, ocr_text: str = "") -> dict:
-    """Returns dict with keys: letter, answer."""
+    """Returns dict with keys: letter, answer, reasoning."""
     provider = os.getenv("LLM_PROVIDER", "anthropic").lower()
     if provider == "openai":
         return _call_openai(image_b64, ocr_text)
-    text = _call_anthropic(image_b64, ocr_text)
-    return _parse_text_response(text)
-
-
-def _parse_text_response(text: str) -> dict:
-    """Parse a plain-text LLM response into letter + answer."""
-    stripped = text.strip()
-    letter = ""
-    if stripped and stripped[0] in "ABCD" and (len(stripped) < 2 or stripped[1] in " .):–-—\n"):
-        letter = stripped[0]
-        rest = stripped[1:].lstrip(" .):–-—")
-        return {"letter": letter, "answer": rest.strip()}
-    return {"letter": "", "answer": stripped}
+    return _call_anthropic(image_b64, ocr_text)
 
 
 def _build_user_text(ocr_text: str) -> str:
@@ -171,8 +159,15 @@ def _call_openai(image_b64: str, ocr_text: str = "") -> dict:
 
 # ─── Anthropic ────────────────────────────────────────────────────────────────
 
-def _call_anthropic(image_b64: str, ocr_text: str = "") -> str:
+def _call_anthropic(image_b64: str, ocr_text: str = "") -> dict:
     api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    user_text = _build_user_text(ocr_text) + (
+        "\n\nNajpierw rozwiąż zadanie krok po kroku, potem podaj odpowiedź."
+        "\nOdpowiedz WYŁĄCZNIE obiektem JSON w tym formacie, bez żadnego innego tekstu:\n"
+        '{"reasoning": "pełna analiza krok po kroku", '
+        '"letter": "A/B/C/D lub pusty string jeśli nie dotyczy", '
+        '"answer": "krótka odpowiedź z uzasadnieniem"}'
+    )
     resp = requests.post(
         "https://api.anthropic.com/v1/messages",
         headers={
@@ -182,7 +177,7 @@ def _call_anthropic(image_b64: str, ocr_text: str = "") -> str:
         },
         json={
             "model": "claude-opus-4-6",
-            "max_tokens": 4096,
+            "max_tokens": 2048,
             "system": SYSTEM_PROMPT,
             "messages": [
                 {
@@ -196,16 +191,19 @@ def _call_anthropic(image_b64: str, ocr_text: str = "") -> str:
                                 "data": image_b64,
                             },
                         },
-                        {"type": "text", "text": _build_user_text(ocr_text)},
+                        {"type": "text", "text": user_text},
                     ],
                 }
             ],
         },
-        timeout=90,
+        timeout=60,
     )
     if not resp.ok:
         raise RuntimeError(f"Anthropic {resp.status_code}: {resp.text[:300]}")
-    return resp.json()["content"][0]["text"]
+    raw = resp.json()["content"][0]["text"].strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    return json.loads(raw)
 
 
 # ─── Screenshot ───────────────────────────────────────────────────────────────
@@ -360,11 +358,15 @@ class OverlayWindow(Gtk.Window):
     def show_answer(self, result: dict):
         letter = result.get("letter", "").strip()
         answer = result.get("answer", "").strip()
-        self._full_answer = f"{letter}: {answer}" if letter else answer
+        reasoning = result.get("reasoning", "").strip()
+        self._full_answer = f"{letter}: {answer}\n\n{reasoning}" if letter else f"{answer}\n\n{reasoning}"
 
         self._status.set_text("")
         self._letter.set_text(letter)
-        self._body.set_text(answer)
+        body = answer
+        if reasoning:
+            body += f"\n\n─── Reasoning ───\n{reasoning}"
+        self._body.set_text(body)
 
         # Start auto-close timer
         self._close_timer = GLib.timeout_add_seconds(AUTO_CLOSE_SEC, self._auto_close)
