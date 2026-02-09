@@ -11,7 +11,8 @@ python3 -m venv "$SCRIPT_DIR/.venv"
 
 # Symlink system GTK3 (gi) into venv
 GI_PATH=$(python3 -c "import gi; print(gi.__path__[0])")
-ln -sf "$GI_PATH" "$SCRIPT_DIR/.venv/lib/python3.12/site-packages/gi"
+VENV_SITE=$("$SCRIPT_DIR/.venv/bin/python3" -c "import site; print(site.getsitepackages()[0])")
+ln -sf "$GI_PATH" "$VENV_SITE/gi"
 
 echo "=== Done! ==="
 echo "1. Edit .env and set your API key"

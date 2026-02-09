@@ -168,7 +168,11 @@ def _call_anthropic(image_b64: str, ocr_text: str = "") -> str:
         },
         json={
             "model": "claude-opus-4-6",
-            "max_tokens": 4096,
+            "max_tokens": 8000,
+            "thinking": {
+                "type": "enabled",
+                "budget_tokens": 5000,
+            },
             "system": SYSTEM_PROMPT,
             "messages": [
                 {
@@ -191,7 +195,12 @@ def _call_anthropic(image_b64: str, ocr_text: str = "") -> str:
     )
     if not resp.ok:
         raise RuntimeError(f"Anthropic {resp.status_code}: {resp.text[:300]}")
-    return resp.json()["content"][0]["text"]
+    content = resp.json()["content"]
+    # With extended thinking, response has multiple blocks; extract the text block
+    for block in content:
+        if block.get("type") == "text":
+            return block["text"]
+    return content[-1]["text"]
 
 
 # ─── Screenshot ───────────────────────────────────────────────────────────────
