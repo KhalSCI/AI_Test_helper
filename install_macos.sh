@@ -27,3 +27,4 @@ echo
 echo "Skróty:"
 echo "  Ctrl+Shift+Q — zaznacz region    Ctrl+Shift+M — przełącz model"
 echo "  Ctrl+Shift+W — cały ekran        Ctrl+Shift+H — schowaj/pokaż nakładkę"
+echo "                                   Ctrl+Shift+G — zmień rozmiar nakładki"

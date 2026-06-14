@@ -37,8 +37,8 @@ NSNoBorder = 0
 FLT_MAX = 1.0e7
 
 SCREENSHOT_PATH = "/tmp/screen_answer.png"
-OVERLAY_WIDTH = 380
-OVERLAY_HEIGHT = 210
+# Selectable overlay sizes (W, H), cycled with the ⤢ button or Ctrl+Shift+G.
+SIZES = [(380, 210), (520, 340), (720, 520)]
 AUTO_CLOSE_SEC = 180
 
 STATE_DIR = Path.home() / ".config" / "screen_answer"
@@ -75,11 +75,14 @@ SYSTEM_PROMPT = (
 class ModelState:
     def __init__(self):
         self.index = 0
+        self.size_index = 0
         try:
             data = json.loads(STATE_FILE.read_text())
             self.index = int(data.get("index", 0)) % len(MODELS)
+            self.size_index = int(data.get("size_index", 0)) % len(SIZES)
         except Exception:
             self.index = 0
+            self.size_index = 0
 
     @property
     def label(self) -> str:
@@ -89,14 +92,26 @@ class ModelState:
     def slug(self) -> str:
         return MODELS[self.index][1]
 
-    def toggle(self) -> str:
-        self.index = (self.index + 1) % len(MODELS)
+    @property
+    def size(self):
+        return SIZES[self.size_index]
+
+    def _save(self):
         try:
             STATE_DIR.mkdir(parents=True, exist_ok=True)
-            STATE_FILE.write_text(json.dumps({"index": self.index}))
+            STATE_FILE.write_text(json.dumps({"index": self.index, "size_index": self.size_index}))
         except Exception:
             pass
+
+    def toggle(self) -> str:
+        self.index = (self.index + 1) % len(MODELS)
+        self._save()
         return self.label
+
+    def cycle_size(self):
+        self.size_index = (self.size_index + 1) % len(SIZES)
+        self._save()
+        return self.size
 
 
 STATE = ModelState()
@@ -241,8 +256,9 @@ class Overlay(NSObject):
         self._build()
         return self
 
+    @objc.python_method
     def _build(self):
-        W, H, pad = OVERLAY_WIDTH, OVERLAY_HEIGHT, 12
+        W, H = STATE.size
         rect = NSMakeRect(0, 0, W, H)
 
         style = NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
@@ -271,41 +287,46 @@ class Overlay(NSObject):
             panel.setOpaque_(True)
             panel.setBackgroundColor_(_rgb(26, 26, 46, 1.0))
         panel.setContentView_(content)
+        self.content = content
 
-        # Top row: model label (left) + Kopiuj / hide buttons (right)
-        self.model_label = _label(NSMakeRect(pad, H - pad - 20, 180, 18),
-                                  11, _rgb(170, 170, 170))
+        # Top row: model label (left) + size / Kopiuj / hide buttons (right)
+        self.model_label = _label(NSMakeRect(0, 0, 10, 10), 11, _rgb(170, 170, 170))
         self.model_label.setStringValue_(STATE.label)
         content.addSubview_(self.model_label)
 
-        btn_hide = NSButton.alloc().initWithFrame_(NSMakeRect(W - pad - 28, H - pad - 26, 28, 26))
-        btn_hide.setTitle_("✕")
-        btn_hide.setBezelStyle_(1)
-        btn_hide.setTarget_(self)
-        btn_hide.setAction_("hideClicked:")
-        content.addSubview_(btn_hide)
+        self.btn_hide = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 10, 10))
+        self.btn_hide.setTitle_("✕")
+        self.btn_hide.setBezelStyle_(1)
+        self.btn_hide.setTarget_(self)
+        self.btn_hide.setAction_("hideClicked:")
+        content.addSubview_(self.btn_hide)
 
-        btn_copy = NSButton.alloc().initWithFrame_(NSMakeRect(W - pad - 28 - 6 - 64, H - pad - 26, 64, 26))
-        btn_copy.setTitle_("Kopiuj")
-        btn_copy.setBezelStyle_(1)
-        btn_copy.setTarget_(self)
-        btn_copy.setAction_("copyClicked:")
-        content.addSubview_(btn_copy)
+        self.btn_copy = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 10, 10))
+        self.btn_copy.setTitle_("Kopiuj")
+        self.btn_copy.setBezelStyle_(1)
+        self.btn_copy.setTarget_(self)
+        self.btn_copy.setAction_("copyClicked:")
+        content.addSubview_(self.btn_copy)
+
+        self.btn_size = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 10, 10))
+        self.btn_size.setTitle_("⤢")
+        self.btn_size.setBezelStyle_(1)
+        self.btn_size.setTarget_(self)
+        self.btn_size.setAction_("cycleSizeClicked:")
+        content.addSubview_(self.btn_size)
 
         # Big answer letter
-        self.letter = _label(NSMakeRect(pad, H - pad - 26 - 44, 140, 44),
-                            34, _rgb(79, 195, 247), bold=True)
+        self.letter = _label(NSMakeRect(0, 0, 10, 10), 34, _rgb(79, 195, 247), bold=True)
         content.addSubview_(self.letter)
 
         # Scrollable answer/reasoning body
-        body_top = H - pad - 26 - 44 - 2
-        scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(pad, pad, W - 2 * pad, body_top - pad))
+        scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, 10, 10))
         scroll.setHasVerticalScroller_(True)
         scroll.setDrawsBackground_(False)
         scroll.setBorderType_(NSNoBorder)
         scroll.setAutohidesScrollers_(True)
 
-        tv = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, W - 2 * pad, body_top - pad))
+        tv = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 10, 10))
         tv.setEditable_(False)
         tv.setSelectable_(True)
         tv.setDrawsBackground_(False)
@@ -317,22 +338,40 @@ class Overlay(NSObject):
         tv.setVerticallyResizable_(True)
         tv.setHorizontallyResizable_(False)
         tv.setAutoresizingMask_(NSViewWidthSizable)
-        # Fixed-width container so text wraps to the panel width (the window is
-        # not resizable, so width-tracking is unnecessary).
-        tv.textContainer().setContainerSize_(NSMakeSize(W - 2 * pad, FLT_MAX))
         scroll.setDocumentView_(tv)
         self.textview = tv
+        self.scroll = scroll
         content.addSubview_(scroll)
 
-        # Position: top-right corner of the main screen (below the menu bar)
+        self.panel = panel
+        self._layout(W, H)
+
+    @objc.python_method
+    def _layout(self, W, H):
+        """Position all subviews for the given panel size and anchor top-right."""
+        pad = 12
+        self.content.setFrame_(NSMakeRect(0, 0, W, H))
+        self.model_label.setFrame_(NSMakeRect(pad, H - pad - 20, W - 2 * pad - 200, 18))
+        self.btn_hide.setFrame_(NSMakeRect(W - pad - 28, H - pad - 26, 28, 26))
+        self.btn_copy.setFrame_(NSMakeRect(W - pad - 28 - 6 - 64, H - pad - 26, 64, 26))
+        self.btn_size.setFrame_(NSMakeRect(W - pad - 28 - 6 - 64 - 6 - 32, H - pad - 26, 32, 26))
+        self.letter.setFrame_(NSMakeRect(pad, H - pad - 26 - 44, 140, 44))
+
+        body_top = H - pad - 26 - 44 - 2
+        body_w, body_h = W - 2 * pad, body_top - pad
+        self.scroll.setFrame_(NSMakeRect(pad, pad, body_w, body_h))
+        self.textview.setFrame_(NSMakeRect(0, 0, body_w, body_h))
+        # Fixed-width container so text wraps to the current panel width.
+        self.textview.textContainer().setContainerSize_(NSMakeSize(body_w, FLT_MAX))
+
+        # Keep the panel pinned to the top-right corner of the main screen.
         sframe = NSScreen.mainScreen().frame()
         x = sframe.origin.x + sframe.size.width - W - 20
         y = sframe.origin.y + sframe.size.height - H - 40
-        panel.setFrameOrigin_(NSMakePoint(x, y))
-
-        self.panel = panel
+        self.panel.setFrame_display_(NSMakeRect(x, y, W, H), True)
 
     # ── Timer ──
+    @objc.python_method
     def _arm_timer(self):
         if self._timer is not None:
             self._timer.invalidate()
@@ -353,10 +392,15 @@ class Overlay(NSObject):
             pb.clearContents()
             pb.setString_forType_(self.full_answer, NSPasteboardTypeString)
 
+    def cycleSizeClicked_(self, sender):
+        self.cycle_size()
+
     # ── Called from the app controller (main thread via AppHelper.callAfter) ──
+    @objc.python_method
     def hide_for_capture(self):
         self.panel.orderOut_(None)
 
+    @objc.python_method
     def show_loading(self):
         self.letter.setStringValue_("…")
         self.textview.setString_("Analizuję...")
@@ -364,6 +408,7 @@ class Overlay(NSObject):
         self._arm_timer()
         self.panel.orderFrontRegardless()
 
+    @objc.python_method
     def show_answer(self, result):
         letter = result.get("letter", "").strip()
         answer = result.get("answer", "").strip()
@@ -379,6 +424,7 @@ class Overlay(NSObject):
         self._arm_timer()
         self.panel.orderFrontRegardless()
 
+    @objc.python_method
     def show_error(self, msg):
         self.full_answer = msg
         self.letter.setStringValue_("!")
@@ -386,9 +432,18 @@ class Overlay(NSObject):
         self._arm_timer()
         self.panel.orderFrontRegardless()
 
+    @objc.python_method
     def update_model_label(self):
         self.model_label.setStringValue_(STATE.label)
 
+    @objc.python_method
+    def cycle_size(self):
+        W, H = STATE.cycle_size()
+        self._layout(W, H)
+        if not self.panel.isVisible():
+            self.panel.orderFrontRegardless()
+
+    @objc.python_method
     def toggle_visibility(self):
         if self.panel.isVisible():
             self.panel.orderOut_(None)
@@ -432,6 +487,9 @@ class App:
     def toggle_hide(self):
         AppHelper.callAfter(self.overlay.toggle_visibility)
 
+    def cycle_size(self):
+        AppHelper.callAfter(self.overlay.cycle_size)
+
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
@@ -447,6 +505,7 @@ def main():
         "<ctrl>+<shift>+w": app.trigger_full,
         "<ctrl>+<shift>+m": app.toggle_model,
         "<ctrl>+<shift>+h": app.toggle_hide,
+        "<ctrl>+<shift>+g": app.cycle_size,
     })
     hotkeys.daemon = True
     hotkeys.start()
@@ -456,6 +515,7 @@ def main():
     print("  Ctrl+Shift+W — cały ekran")
     print("  Ctrl+Shift+M — przełącz model (Opus 4.8 / Sonnet 4.6)")
     print("  Ctrl+Shift+H — schowaj/pokaż nakładkę")
+    print("  Ctrl+Shift+G — zmień rozmiar nakładki")
     print("  Ctrl+C aby zakończyć")
 
     try:
