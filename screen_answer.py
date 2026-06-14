@@ -4,6 +4,7 @@
 import base64
 import json
 import os
+import signal
 import subprocess
 import threading
 import time
@@ -216,9 +217,12 @@ def take_screenshot(select_region: bool = False):
         cmd = ["screencapture", "-i", "-x", SCREENSHOT_PATH]  # -i: interactive region
     else:
         cmd = ["screencapture", "-x", SCREENSHOT_PATH]        # -x: silent (no sound)
-    subprocess.run(cmd, check=True)
+    # Don't use check=True: cancelling the region selection (Esc / right-click)
+    # makes screencapture exit non-zero without writing a file — treat that as
+    # a silent cancel rather than an error.
+    subprocess.run(cmd)
 
-    # On cancel (Esc during region select) no file is written.
+    # On cancel no file is written → signal "cancelled" to the caller.
     if not os.path.exists(SCREENSHOT_PATH) or os.path.getsize(SCREENSHOT_PATH) == 0:
         return None
     with open(SCREENSHOT_PATH, "rb") as f:
@@ -490,6 +494,9 @@ class App:
     def cycle_size(self):
         AppHelper.callAfter(self.overlay.cycle_size)
 
+    def quit(self):
+        AppHelper.callAfter(lambda: os._exit(0))
+
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
@@ -506,6 +513,7 @@ def main():
         "<ctrl>+<shift>+m": app.toggle_model,
         "<ctrl>+<shift>+h": app.toggle_hide,
         "<ctrl>+<shift>+g": app.cycle_size,
+        "<ctrl>+<shift>+x": app.quit,
     })
     hotkeys.daemon = True
     hotkeys.start()
@@ -516,12 +524,14 @@ def main():
     print("  Ctrl+Shift+M — przełącz model (Opus 4.8 / Sonnet 4.6)")
     print("  Ctrl+Shift+H — schowaj/pokaż nakładkę")
     print("  Ctrl+Shift+G — zmień rozmiar nakładki")
-    print("  Ctrl+C aby zakończyć")
+    print("  Ctrl+Shift+X — zakończ program")
+    print("  Ctrl+C (w terminalu) również kończy")
 
-    try:
-        AppHelper.runEventLoop()
-    except KeyboardInterrupt:
-        pass
+    # The Cocoa event loop blocks the main thread in native code, so Python's
+    # default SIGINT handler never runs. Restoring SIG_DFL lets Ctrl+C terminate
+    # the process immediately.
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    AppHelper.runEventLoop()
 
 
 if __name__ == "__main__":
